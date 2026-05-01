@@ -1,0 +1,20 @@
+/ {
+	buttons {
+		compatible = "gpio-keys";
+
+		enter_button: enter_button {
+			gpios = <&gpio0 8 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Enter Button";
+		};
+
+		esc_button: esc_button {
+			gpios = <&gpio0 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Esc Button";
+		};
+	};
+
+	aliases {
+		sw0 = &enter_button;
+		sw1 = &esc_button;
+	};
+};
