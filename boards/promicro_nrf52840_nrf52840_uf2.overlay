@@ -2,19 +2,19 @@
 	buttons {
 		compatible = "gpio-keys";
 
-		enter_button: enter_button {
+		gesture_button: gesture_button {
 			gpios = <&gpio0 8 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Enter Button";
+			label = "Gesture Button";
 		};
 
-		esc_button: esc_button {
+		record_button: record_button {
 			gpios = <&gpio0 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Esc Button";
+			label = "Record Button";
 		};
 	};
 
 	aliases {
-		sw0 = &enter_button;
-		sw1 = &esc_button;
+		sw0 = &gesture_button;
+		recordbtn = &record_button;
 	};
 };

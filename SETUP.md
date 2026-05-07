@@ -20,10 +20,22 @@ $ west sdk install
 
 If your app lives outside the west workspace, use the workspace root to build it:
 
+Build for `promicro_nrf52840/nrf52840/uf2`:
+
 ```sh
 $ cd /path/to/zephyr-workspace
 $ export ZEPHYR_BASE=/path/to/zephyr-workspace/zephyr
 $ west build -p always -b promicro_nrf52840/nrf52840/uf2 \
+    -s /path/to/enter-esc-nrf52840 \
+    -d /path/to/enter-esc-nrf52840/build
+```
+
+Build for `xiao_ble/nrf52840/sense`:
+
+```sh
+$ cd /path/to/zephyr-workspace
+$ export ZEPHYR_BASE=/path/to/zephyr-workspace/zephyr
+$ west build -p always -b xiao_ble/nrf52840/sense \
     -s /path/to/enter-esc-nrf52840 \
     -d /path/to/enter-esc-nrf52840/build
 ```

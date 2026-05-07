@@ -1,0 +1,14 @@
+/ {
+	buttons {
+		compatible = "gpio-keys";
+
+		record_button: record_button {
+			gpios = <&gpio0 2 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Record Control Button";
+		};
+	};
+
+	aliases {
+		recordbtn = &record_button;
+	};
+};
