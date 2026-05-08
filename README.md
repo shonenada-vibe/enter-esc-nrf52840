@@ -18,11 +18,12 @@ Features:
 
 - BLE device name: `EnterEsc Keyboard`
 - `D2 / P0.08` gesture button:
-  double click sends `Enter` (`0x28`)
+  single or double click sends `Enter` (`0x28`)
   triple click sends `Esc` (`0x29`)
 - `D3 / P0.06` record-control button:
   press and hold sends `0x01`
   release sends `0x00`
+- Red LED stays on while the record-control button is held
 - Supports bonding
 
 Default button pins:

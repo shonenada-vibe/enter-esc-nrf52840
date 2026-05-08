@@ -11,6 +11,7 @@
 #include <zephyr/sys/printk.h>
 
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/addr.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
@@ -53,6 +54,7 @@
 #define HAS_PRIMARY_BUTTON_INPUT       (HAS_DIRECT_KEY_BUTTONS || HAS_GESTURE_BUTTON_INPUT)
 #define HAS_STATUS_LED                 (HAS_TAP_SENSOR_INPUT && DT_HAS_ALIAS(led2))
 #define HAS_RECORD_BUTTON              DT_HAS_ALIAS(recordbtn)
+#define HAS_RECORD_LED                 (HAS_GESTURE_BUTTON_INPUT && HAS_RECORD_BUTTON && DT_HAS_ALIAS(led0))
 
 #if !HAS_PRIMARY_BUTTON_INPUT && !HAS_TAP_SENSOR_INPUT
 #error "No supported input source found for this board"
@@ -131,6 +133,10 @@ static struct bt_uuid_128 record_ctrl_service_uuid = BT_UUID_INIT_128(
 	BT_UUID_RECORD_CTRL_SERVICE_VAL);
 static struct bt_uuid_128 record_ctrl_state_uuid = BT_UUID_INIT_128(
 	BT_UUID_RECORD_CTRL_STATE_VAL);
+#endif
+
+#if HAS_RECORD_LED
+static const struct gpio_dt_spec record_led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 #endif
 
 static struct bt_conn *active_conn;
@@ -643,11 +649,9 @@ static void gesture_sequence_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	if (gesture_click_count == 2U) {
-		printk("Double click detected\n");
+	if ((gesture_click_count == 1U) || (gesture_click_count == 2U)) {
+		printk("%s click detected\n", gesture_click_count == 1U ? "Single" : "Double");
 		emit_key_tap(ENTER_KEYCODE);
-	} else if (gesture_click_count == 1U) {
-		printk("Single click ignored\n");
 	}
 
 	gesture_click_count = 0U;
@@ -753,6 +757,38 @@ static int send_record_ctrl_state(void)
 	return err;
 }
 
+#if HAS_RECORD_LED
+static int record_led_set(bool on)
+{
+	int err = gpio_pin_set_dt(&record_led, on ? 1 : 0);
+
+	if (err) {
+		printk("Record LED set failed (err %d)\n", err);
+	}
+
+	return err;
+}
+
+static int record_led_init(void)
+{
+	int err;
+
+	if (!gpio_is_ready_dt(&record_led)) {
+		printk("Record LED GPIO controller not ready\n");
+		return -ENODEV;
+	}
+
+	err = gpio_pin_configure_dt(&record_led, GPIO_OUTPUT_INACTIVE);
+	if (err) {
+		printk("Record LED configure failed (err %d)\n", err);
+		return err;
+	}
+
+	printk("Record LED ready\n");
+	return 0;
+}
+#endif
+
 static void apply_record_button_state(bool pressed)
 {
 	if (pressed == record_button_pressed) {
@@ -761,6 +797,9 @@ static void apply_record_button_state(bool pressed)
 
 	record_button_pressed = pressed;
 	record_ctrl_state = pressed ? RECORD_STATE_ACTIVE : RECORD_STATE_IDLE;
+#if HAS_RECORD_LED
+	record_led_set(pressed);
+#endif
 
 	printk("Record control %s\n", pressed ? "start" : "stop");
 	send_record_ctrl_state();
@@ -814,6 +853,9 @@ static int record_button_init(void)
 
 	record_button_pressed = gpio_button_is_pressed(&record_button);
 	record_ctrl_state = record_button_pressed ? RECORD_STATE_ACTIVE : RECORD_STATE_IDLE;
+#if HAS_RECORD_LED
+	record_led_set(record_button_pressed);
+#endif
 	printk("Initial record button=%d\n", record_button_pressed);
 
 	return 0;
@@ -929,15 +971,23 @@ static int tap_sensor_init(void)
 }
 #endif
 
+static const char *conn_dst_str(const struct bt_conn *conn, char *addr, size_t len)
+{
+	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, len);
+	return addr;
+}
+
 static void connected(struct bt_conn *conn, uint8_t err)
 {
+	char addr[BT_ADDR_LE_STR_LEN];
+
 	if (err) {
-		printk("Connection failed: %s (err 0x%02x)\n", bt_conn_dst_str(conn), err);
+		printk("Connection failed: %s (err 0x%02x)\n", conn_dst_str(conn, addr, sizeof(addr)), err);
 		advertising_start();
 		return;
 	}
 
-	printk("Connected: %s\n", bt_conn_dst_str(conn));
+	printk("Connected: %s\n", conn_dst_str(conn, addr, sizeof(addr)));
 
 	if (active_conn == NULL) {
 		active_conn = bt_conn_ref(conn);
@@ -959,7 +1009,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	printk("Disconnected: %s (reason 0x%02x)\n", bt_conn_dst_str(conn), reason);
+	char addr[BT_ADDR_LE_STR_LEN];
+
+	printk("Disconnected: %s (reason 0x%02x)\n", conn_dst_str(conn, addr, sizeof(addr)), reason);
 
 	if (active_conn == conn) {
 		bt_conn_unref(active_conn);
@@ -978,12 +1030,14 @@ static void security_changed(struct bt_conn *conn,
 			     bt_security_t level,
 			     enum bt_security_err err)
 {
+	char addr[BT_ADDR_LE_STR_LEN];
+
 	if (!err) {
-		printk("Security changed: %s level %u\n", bt_conn_dst_str(conn), level);
+		printk("Security changed: %s level %u\n", conn_dst_str(conn, addr, sizeof(addr)), level);
 		return;
 	}
 
-	printk("Security failed: %s level %u err %d\n", bt_conn_dst_str(conn), level, err);
+	printk("Security failed: %s level %u err %d\n", conn_dst_str(conn, addr, sizeof(addr)), level, err);
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -994,12 +1048,16 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 
 static void pairing_complete(struct bt_conn *conn, bool bonded)
 {
-	printk("Pairing complete: %s bonded=%d\n", bt_conn_dst_str(conn), bonded);
+	char addr[BT_ADDR_LE_STR_LEN];
+
+	printk("Pairing complete: %s bonded=%d\n", conn_dst_str(conn, addr, sizeof(addr)), bonded);
 }
 
 static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
 {
-	printk("Pairing failed: %s reason=%d\n", bt_conn_dst_str(conn), reason);
+	char addr[BT_ADDR_LE_STR_LEN];
+
+	printk("Pairing failed: %s reason=%d\n", conn_dst_str(conn, addr, sizeof(addr)), reason);
 }
 
 static struct bt_conn_auth_info_cb auth_info_cb = {
@@ -1055,6 +1113,13 @@ static int input_init(void)
 
 #if HAS_TAP_SENSOR_INPUT
 	err = tap_sensor_init();
+	if (err) {
+		return err;
+	}
+#endif
+
+#if HAS_RECORD_LED
+	err = record_led_init();
 	if (err) {
 		return err;
 	}

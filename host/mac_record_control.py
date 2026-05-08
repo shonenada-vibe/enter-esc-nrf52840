@@ -9,10 +9,12 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib import error, request
 
 import sounddevice as sd
 from bleak import BleakClient, BleakScanner
@@ -22,7 +24,7 @@ from groq import Groq
 DEFAULT_DEVICE_NAME = "EnterEsc Seeed"
 DEFAULT_SERVICE_UUID = "48f2d000-7a15-4b3f-8d67-60587f5d1001"
 DEFAULT_CHAR_UUID = "48f2d000-7a15-4b3f-8d67-60587f5d1002"
-DEFAULT_STT_PROVIDER = "groq"
+DEFAULT_STT_PROVIDER = "whisper" if os.environ.get("WHISPER_API_URL") else "groq"
 DEFAULT_MODEL = "whisper-large-v3-turbo"
 DEFAULT_VAS_DEMO_DIR = "./"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -41,12 +43,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 			    help="Custom record-control service UUID.")
 	parser.add_argument("--char-uuid", default=DEFAULT_CHAR_UUID,
 			    help="Record-control state characteristic UUID.")
-	parser.add_argument("--stt-provider", choices=("groq", "vas"), default=DEFAULT_STT_PROVIDER,
+	parser.add_argument("--stt-provider", choices=("groq", "vas", "whisper"), default=DEFAULT_STT_PROVIDER,
 			    help=f"STT provider to use. Default: {DEFAULT_STT_PROVIDER}")
 	parser.add_argument("--model", default=DEFAULT_MODEL,
-			    help=f"Groq transcription model. Default: {DEFAULT_MODEL}")
+			    help=f"Transcription model for Groq or local Whisper. Default: {DEFAULT_MODEL}")
 	parser.add_argument("--language", default="zh",
-			    help="Optional ISO-639-1 language hint for Groq. Default: zh")
+			    help="Optional ISO-639-1 language hint for Groq/local Whisper. Default: zh")
+	parser.add_argument("--whisper-api-url", default=os.environ.get("WHISPER_API_URL"),
+			    help="OpenAI-compatible Whisper transcription endpoint. Falls back to WHISPER_API_URL.")
+	parser.add_argument("--whisper-api-key", default=os.environ.get("WHISPER_API_KEY", ""),
+			    help="Optional bearer token for the local Whisper endpoint. Falls back to WHISPER_API_KEY.")
 	parser.add_argument("--vas-demo-dir", default=DEFAULT_VAS_DEMO_DIR,
 			    help=f"Path to the VAS demo Go client directory. Default: {DEFAULT_VAS_DEMO_DIR}")
 	parser.add_argument("--vas-addr", default=os.environ.get("VAS_DEMO_ADDR", "106.53.30.28"),
@@ -63,8 +69,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 			    help="Microphone sample rate in Hz. Default: 16000")
 	parser.add_argument("--channels", type=int, default=1,
 			    help="Recorded channel count. Default: 1")
-	parser.add_argument("--input-device", type=int, default=None,
-			    help="Optional sounddevice input device index. Uses system default if omitted.")
+	parser.add_argument("--input-device", default=None,
+			    help="Optional sounddevice input device index or name fragment. Skips the startup prompt.")
+	parser.add_argument("--list-input-devices", action="store_true",
+			    help="List available sounddevice input devices and exit.")
 	parser.add_argument("--recordings-dir", default=".cache/host_recordings",
 			    help="Directory for temporary WAV files. Default: .cache/host_recordings")
 	parser.add_argument("--scan-timeout", type=float, default=10.0,
@@ -82,13 +90,178 @@ class RecordingResult:
 	duration_s: float
 
 
+class AudioDeviceError(RuntimeError):
+	pass
+
+
 class Transcriber:
 	def transcribe(self, path: Path) -> str:
 		raise NotImplementedError
 
 
+def _input_devices() -> list[tuple[int, dict]]:
+	try:
+		devices = sd.query_devices()
+	except Exception as exc:
+		raise AudioDeviceError(f"Unable to query audio input devices: {exc}") from exc
+
+	return [
+		(index, device)
+		for index, device in enumerate(devices)
+		if int(device.get("max_input_channels") or 0) > 0
+	]
+
+
+def _default_input_device_index() -> Optional[int]:
+	default_device = sd.default.device
+	if isinstance(default_device, (list, tuple)):
+		default_device = default_device[0] if default_device else None
+
+	try:
+		index = int(default_device)
+	except (TypeError, ValueError):
+		return None
+
+	if index < 0:
+		return None
+
+	return index
+
+
+def format_input_devices() -> str:
+	default_index = _default_input_device_index()
+	lines = ["Available sounddevice input devices:"]
+	devices = _input_devices()
+	if not devices:
+		lines.append("  (none)")
+		return "\n".join(lines)
+
+	for index, device in devices:
+		default_marker = " *" if index == default_index else "  "
+		name = device.get("name") or "(unnamed)"
+		channels = int(device.get("max_input_channels") or 0)
+		sample_rate = int(float(device.get("default_samplerate") or 0))
+		lines.append(f"{default_marker} {index}: {name} ({channels} input ch, default {sample_rate} Hz)")
+
+	return "\n".join(lines)
+
+
+def select_input_device(channels: int, sample_rate: int) -> str:
+	devices = _input_devices()
+	if not devices:
+		raise AudioDeviceError(
+			"No audio input devices are visible to PortAudio. Check the microphone connection "
+			"and macOS Microphone permission for the terminal app running this script."
+		)
+
+	default_index = _default_input_device_index()
+	if default_index not in {index for index, _device in devices} and len(devices) == 1:
+		default_index = devices[0][0]
+
+	print(format_input_devices(), flush=True)
+	while True:
+		default_hint = f" [{default_index}]" if default_index is not None else ""
+		try:
+			choice = input(f"Select input device index or name{default_hint}: ").strip()
+		except EOFError as exc:
+			raise AudioDeviceError(
+				"No input device was selected. Run in an interactive terminal or pass "
+				"`--input-device <index-or-name>`."
+			) from exc
+		if not choice and default_index is not None:
+			choice = str(default_index)
+		if not choice:
+			print("Enter an input device index or name.", flush=True)
+			continue
+
+		try:
+			selected_index = resolve_input_device(choice, channels=channels, sample_rate=sample_rate)
+		except AudioDeviceError as exc:
+			print(f"Audio input error: {exc}", flush=True)
+			continue
+
+		selected_device = sd.query_devices(selected_index)
+		selected_name = selected_device.get("name") or selected_index
+		print(f"Selected input {selected_index} ({selected_name})", flush=True)
+		return str(selected_index)
+
+
+def resolve_input_device(input_device: Optional[str], channels: int, sample_rate: int) -> int:
+	devices = _input_devices()
+	if not devices:
+		raise AudioDeviceError(
+			"No audio input devices are visible to PortAudio. Check the microphone connection "
+			"and macOS Microphone permission for the terminal app running this script."
+		)
+
+	if input_device is None:
+		default_index = _default_input_device_index()
+		index = None
+		for index, device in devices:
+			if index == default_index:
+				break
+		else:
+			index = None
+
+		if index is None and len(devices) == 1:
+			index = devices[0][0]
+
+		if index is None:
+			raise AudioDeviceError(
+				"PortAudio has no valid default input device. Pass one explicitly with "
+				"`--input-device <index-or-name>`.\n"
+				+ format_input_devices()
+			)
+		device = sd.query_devices(index)
+	else:
+		try:
+			index = int(input_device)
+		except ValueError:
+			name_fragment = input_device.casefold()
+			matches = [
+				(index, device)
+				for index, device in devices
+				if name_fragment in (device.get("name") or "").casefold()
+			]
+			if not matches:
+				raise AudioDeviceError(
+					f"No audio input device matches {input_device!r}.\n{format_input_devices()}"
+				)
+			if len(matches) > 1:
+				matched = ", ".join(f"{index}: {device.get('name')}" for index, device in matches)
+				raise AudioDeviceError(
+					f"Audio input device name {input_device!r} is ambiguous: {matched}"
+				)
+			index, device = matches[0]
+		else:
+			for device_index, device in devices:
+				if device_index == index:
+					break
+			else:
+				raise AudioDeviceError(
+					f"Audio input device {input_device!r} is not an available input device.\n"
+					+ format_input_devices()
+				)
+
+	try:
+		sd.check_input_settings(
+			device=index,
+			channels=channels,
+			dtype="int16",
+			samplerate=sample_rate,
+		)
+	except Exception as exc:
+		name = device.get("name") or index
+		raise AudioDeviceError(
+			f"Audio input device {index} ({name}) does not support "
+			f"{channels} channel(s) at {sample_rate} Hz: {exc}"
+		) from exc
+
+	return index
+
+
 class AudioRecorder:
-	def __init__(self, sample_rate: int, channels: int, input_device: Optional[int], recordings_dir: Path):
+	def __init__(self, sample_rate: int, channels: int, input_device: Optional[str], recordings_dir: Path):
 		self.sample_rate = sample_rate
 		self.channels = channels
 		self.input_device = input_device
@@ -105,6 +278,12 @@ class AudioRecorder:
 				print("Recorder already active; ignoring duplicate start", flush=True)
 				return
 
+			device_index = resolve_input_device(
+				self.input_device,
+				channels=self.channels,
+				sample_rate=self.sample_rate,
+			)
+			device_info = sd.query_devices(device_index)
 			self.recordings_dir.mkdir(parents=True, exist_ok=True)
 			filename = time.strftime("recording-%Y%m%d-%H%M%S.wav")
 			self.path = self.recordings_dir / filename
@@ -113,17 +292,38 @@ class AudioRecorder:
 			self.wave_file.setsampwidth(2)
 			self.wave_file.setframerate(self.sample_rate)
 
-			self.stream = sd.RawInputStream(
-				samplerate=self.sample_rate,
-				channels=self.channels,
-				dtype="int16",
-				blocksize=0,
-				device=self.input_device,
-				callback=self._callback,
-			)
-			self.stream.start()
+			try:
+				self.stream = sd.RawInputStream(
+					samplerate=self.sample_rate,
+					channels=self.channels,
+					dtype="int16",
+					blocksize=0,
+					device=device_index,
+					callback=self._callback,
+				)
+				self.stream.start()
+			except Exception:
+				stream = self.stream
+				wave_file = self.wave_file
+				path = self.path
+				self.stream = None
+				self.wave_file = None
+				self.path = None
+				self.started_at = None
+				if stream is not None:
+					with contextlib.suppress(Exception):
+						stream.close()
+				if wave_file is not None:
+					with contextlib.suppress(Exception):
+						wave_file.close()
+				if path is not None:
+					with contextlib.suppress(Exception):
+						path.unlink()
+				raise
+
 			self.started_at = time.time()
-			print(f"Recording started: {self.path}", flush=True)
+			device_name = device_info.get("name") or device_index
+			print(f"Recording started from input {device_index} ({device_name}): {self.path}", flush=True)
 
 	def stop(self) -> Optional[RecordingResult]:
 		with self.lock:
@@ -187,6 +387,76 @@ class GroqTranscriber(Transcriber):
 		return text
 
 
+class LocalWhisperTranscriber(Transcriber):
+	def __init__(self, api_url: Optional[str], api_key: str, model: str, language: str):
+		if not api_url:
+			raise RuntimeError(
+				"WHISPER_API_URL is not set. Provide --whisper-api-url or set WHISPER_API_URL."
+			)
+
+		self.api_url = api_url
+		self.api_key = api_key
+		self.model = model
+		self.language = language
+
+	def transcribe(self, path: Path) -> str:
+		fields = {
+			"model": self.model,
+			"language": self.language,
+			"response_format": "json",
+			"temperature": "0",
+		}
+		body, content_type = self._multipart_body(fields, path)
+		headers = {"Content-Type": content_type}
+		if self.api_key:
+			headers["Authorization"] = f"Bearer {self.api_key}"
+
+		req = request.Request(self.api_url, data=body, headers=headers, method="POST")
+		try:
+			with request.urlopen(req, timeout=120) as response:
+				payload = json.loads(response.read().decode("utf-8"))
+		except error.HTTPError as exc:
+			error_body = exc.read().decode("utf-8", errors="replace")
+			raise RuntimeError(
+				f"Local Whisper request failed with HTTP {exc.code}: {error_body}"
+			) from exc
+		except error.URLError as exc:
+			raise RuntimeError(f"Local Whisper request failed: {exc}") from exc
+
+		text = self._extract_text(payload)
+		print(f"Local Whisper transcription: {text!r}", flush=True)
+		return text
+
+	def _multipart_body(self, fields: dict[str, str], path: Path) -> tuple[bytes, str]:
+		boundary = f"----enter-esc-{uuid.uuid4().hex}"
+		parts = []
+		for name, value in fields.items():
+			parts.extend([
+				f"--{boundary}\r\n".encode(),
+				f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+				str(value).encode(),
+				b"\r\n",
+			])
+
+		parts.extend([
+			f"--{boundary}\r\n".encode(),
+			f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'.encode(),
+			b"Content-Type: audio/wav\r\n\r\n",
+			path.read_bytes(),
+			b"\r\n",
+			f"--{boundary}--\r\n".encode(),
+		])
+		return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+	def _extract_text(self, payload) -> str:
+		if isinstance(payload, dict):
+			text = payload.get("text") or payload.get("transcription")
+			if text is not None:
+				return str(text).strip()
+
+		raise RuntimeError(f"Local Whisper response did not include transcription text: {payload!r}")
+
+
 class VASTranscriber(Transcriber):
 	def __init__(
 		self,
@@ -248,6 +518,14 @@ class VASTranscriber(Transcriber):
 def build_transcriber(args: argparse.Namespace) -> Transcriber:
 	if args.stt_provider == "groq":
 		return GroqTranscriber(model=args.model, language=args.language)
+
+	if args.stt_provider == "whisper":
+		return LocalWhisperTranscriber(
+			api_url=args.whisper_api_url,
+			api_key=args.whisper_api_key,
+			model=args.model,
+			language=args.language,
+		)
 
 	if args.stt_provider == "vas":
 		return VASTranscriber(
@@ -377,7 +655,15 @@ class RecordControlApp:
 			if self.currently_recording:
 				return
 
-			self.recorder.start()
+			try:
+				self.recorder.start()
+			except AudioDeviceError as exc:
+				print(f"Audio input error: {exc}", flush=True)
+				return
+			except Exception as exc:
+				print(f"Recording start error: {exc}", flush=True)
+				return
+
 			self.currently_recording = True
 
 	async def _stop_recording_and_transcribe(self) -> None:
@@ -421,6 +707,24 @@ def install_signal_handlers(app: RecordControlApp) -> None:
 async def main_async() -> int:
 	parser = build_arg_parser()
 	args = parser.parse_args()
+
+	if args.list_input_devices:
+		try:
+			print(format_input_devices(), flush=True)
+		except AudioDeviceError as exc:
+			print(exc, file=sys.stderr, flush=True)
+			return 1
+		return 0
+
+	if args.input_device is None:
+		try:
+			args.input_device = select_input_device(
+				channels=args.channels,
+				sample_rate=args.sample_rate,
+			)
+		except AudioDeviceError as exc:
+			print(exc, file=sys.stderr, flush=True)
+			return 1
 
 	app = RecordControlApp(args)
 	install_signal_handlers(app)
