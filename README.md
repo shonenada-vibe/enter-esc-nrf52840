@@ -136,6 +136,24 @@ Run the Mac helper with Groq:
 python host/mac_record_control.py
 ```
 
+The helper now starts in a curses TUI by default. You can edit runtime settings live without restarting:
+
+- Up / Down: select a field
+- Enter: edit text / number values
+- Space: toggle boolean values
+- Left / Right: cycle choice fields such as `stt_provider`
+- `i`: log available audio input devices
+- `r`: reconnect BLE immediately with the current config
+- `q`: quit
+
+Connection-related changes such as BLE device name or characteristic UUID trigger a reconnect so the new settings take effect right away. Recording, STT, translation, and typing settings are picked up on the next action without restarting the script.
+
+If you want the old non-TUI mode:
+
+```sh
+python host/mac_record_control.py --no-tui
+```
+
 To use the helper with the `promicro_nrf52840/nrf52840/uf2` target instead of XIAO:
 
 ```sh
