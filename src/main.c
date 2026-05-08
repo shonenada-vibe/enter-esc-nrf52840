@@ -40,6 +40,7 @@
 #define CLICK_SEQUENCE_TIMEOUT_MS      300
 #define RECORD_STATE_IDLE              0x00
 #define RECORD_STATE_ACTIVE            0x01
+#define STATUS_LED_BLINK_MS            500
 
 #define TAP_SAMPLE_PERIOD_MS           10
 #define TAP_SEQUENCE_TIMEOUT_MS        250
@@ -54,7 +55,7 @@
 #define HAS_PRIMARY_BUTTON_INPUT       (HAS_DIRECT_KEY_BUTTONS || HAS_GESTURE_BUTTON_INPUT)
 #define HAS_STATUS_LED                 (HAS_TAP_SENSOR_INPUT && DT_HAS_ALIAS(led2))
 #define HAS_RECORD_BUTTON              DT_HAS_ALIAS(recordbtn)
-#define HAS_RECORD_LED                 (HAS_GESTURE_BUTTON_INPUT && HAS_RECORD_BUTTON && DT_HAS_ALIAS(led0))
+#define HAS_RECORD_LED                 (HAS_RECORD_BUTTON && DT_HAS_ALIAS(led0))
 
 #if !HAS_PRIMARY_BUTTON_INPUT && !HAS_TAP_SENSOR_INPUT
 #error "No supported input source found for this board"
@@ -114,6 +115,8 @@ static struct k_work_delayable tap_sequence_work;
 static struct k_work_delayable key_release_work;
 #endif
 
+static struct bt_conn *active_conn;
+
 #if HAS_TAP_SENSOR_INPUT
 static bool tap_detection_armed = true;
 static uint8_t tap_sequence_count;
@@ -121,7 +124,73 @@ static int64_t last_tap_peak_ms;
 #endif
 
 #if HAS_STATUS_LED
+enum status_led_mode {
+	STATUS_LED_MODE_IDLE,
+	STATUS_LED_MODE_ADVERTISING,
+	STATUS_LED_MODE_CONNECTED,
+};
+
 static const struct gpio_dt_spec status_led = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
+static struct k_work_delayable status_led_blink_work;
+static enum status_led_mode status_led_mode = STATUS_LED_MODE_IDLE;
+static bool status_led_is_on;
+
+static int status_led_apply(bool on)
+{
+	int err = gpio_pin_set_dt(&status_led, on ? 1 : 0);
+
+	if (err) {
+		printk("Status LED set failed (err %d)\n", err);
+		return err;
+	}
+
+	status_led_is_on = on;
+	return 0;
+}
+
+static void status_led_blink_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (active_conn != NULL) {
+		status_led_mode = STATUS_LED_MODE_CONNECTED;
+		status_led_apply(true);
+		return;
+	}
+
+	if (status_led_mode != STATUS_LED_MODE_ADVERTISING) {
+		return;
+	}
+
+	status_led_apply(!status_led_is_on);
+	k_work_reschedule(&status_led_blink_work, K_MSEC(STATUS_LED_BLINK_MS));
+}
+
+static void status_led_set_mode(enum status_led_mode mode)
+{
+	if (status_led_mode == mode) {
+		return;
+	}
+
+	status_led_mode = mode;
+	k_work_cancel_delayable(&status_led_blink_work);
+
+	if (mode == STATUS_LED_MODE_ADVERTISING) {
+		status_led_apply(true);
+		k_work_reschedule(&status_led_blink_work, K_MSEC(STATUS_LED_BLINK_MS));
+		printk("Status LED blinking: waiting for BLE connection\n");
+		return;
+	}
+
+	if (mode == STATUS_LED_MODE_CONNECTED) {
+		status_led_apply(true);
+		printk("Status LED on: BLE connected\n");
+		return;
+	}
+
+	status_led_apply(false);
+	printk("Status LED off\n");
+}
 #endif
 
 #if HAS_RECORD_BUTTON
@@ -138,8 +207,6 @@ static struct bt_uuid_128 record_ctrl_state_uuid = BT_UUID_INIT_128(
 #if HAS_RECORD_LED
 static const struct gpio_dt_spec record_led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 #endif
-
-static struct bt_conn *active_conn;
 
 static bool enter_pressed;
 static bool esc_pressed;
@@ -227,8 +294,18 @@ static void advertising_start(void)
 {
 	int err;
 
+	if (active_conn != NULL) {
+#if HAS_STATUS_LED
+		status_led_set_mode(STATUS_LED_MODE_CONNECTED);
+#endif
+		return;
+	}
+
 	err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
 	if (err == -EALREADY) {
+#if HAS_STATUS_LED
+		status_led_set_mode(STATUS_LED_MODE_ADVERTISING);
+#endif
 		return;
 	}
 
@@ -238,6 +315,9 @@ static void advertising_start(void)
 	}
 
 	printk("Advertising started\n");
+#if HAS_STATUS_LED
+	status_led_set_mode(STATUS_LED_MODE_ADVERTISING);
+#endif
 }
 
 static ssize_t read_hid_info(struct bt_conn *conn,
@@ -993,6 +1073,10 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		active_conn = bt_conn_ref(conn);
 	}
 
+#if HAS_STATUS_LED
+	status_led_set_mode(STATUS_LED_MODE_CONNECTED);
+#endif
+
 	err = bt_conn_set_security(conn, BT_SECURITY_L2);
 	if (err) {
 		printk("Security setup failed (err %d)\n", err);
@@ -1070,6 +1154,8 @@ static int status_led_init(void)
 #if HAS_STATUS_LED
 	int err;
 
+	k_work_init_delayable(&status_led_blink_work, status_led_blink_work_handler);
+
 	if (!gpio_is_ready_dt(&status_led)) {
 		printk("Status LED controller not ready\n");
 		return -ENODEV;
@@ -1081,13 +1167,8 @@ static int status_led_init(void)
 		return err;
 	}
 
-	err = gpio_pin_set_dt(&status_led, 1);
-	if (err) {
-		printk("Status LED set failed (err %d)\n", err);
-		return err;
-	}
-
-	printk("Status LED on\n");
+	status_led_is_on = false;
+	printk("Status LED ready\n");
 #endif
 
 	return 0;
@@ -1141,11 +1222,6 @@ int main(void)
 
 	printk("EnterEsc Keyboard starting\n");
 
-	err = status_led_init();
-	if (err) {
-		return 0;
-	}
-
 #if HAS_DIRECT_KEY_BUTTONS || HAS_GESTURE_BUTTON_INPUT
 	k_work_init_delayable(&primary_button_scan_work, primary_button_scan_work_handler);
 #endif
@@ -1166,6 +1242,11 @@ int main(void)
 #if HAS_RECORD_BUTTON
 	k_work_init_delayable(&record_button_scan_work, record_button_scan_work_handler);
 #endif
+
+	err = status_led_init();
+	if (err) {
+		return 0;
+	}
 
 	err = input_init();
 	if (err) {

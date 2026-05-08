@@ -23,7 +23,7 @@ Features:
 - `D3 / P0.06` record-control button:
   press and hold sends `0x01`
   release sends `0x00`
-- Red LED stays on while the record-control button is held
+- Red LED stays on while record control is active
 - Supports bonding
 
 Default button pins:
@@ -47,7 +47,9 @@ If your buttons are wired to different pins, update the `gpios` entries in [boar
 - Triple tap on the board sends `Esc` (`0x29`)
 - Each gesture emits a short key press followed by release
 - Tap detection is implemented in software from the onboard LSM6DS3TR-C accelerometer
-- The onboard blue LED turns on after boot
+- The onboard blue LED blinks while waiting for a BLE connection
+- The onboard blue LED stays on after BLE connects
+- The onboard red LED stays on while record control is active
 - An external `Button B` on `D0 / P0.02` sends BLE record control events
 
 Default `Button B` wiring:
@@ -146,6 +148,14 @@ If you want a different input language, override it explicitly, for example:
 ```sh
 python host/mac_record_control.py --language en
 ```
+
+If you speak Chinese but want English typed into the active app, enable translation:
+
+```sh
+python host/mac_record_control.py --translate-to-en
+```
+
+This optional post-processing step uses the Groq API key in `GROQ_API_KEY` to translate the transcribed Chinese text into English before typing it.
 
 Run the Mac helper with VAS:
 

@@ -26,6 +26,7 @@ DEFAULT_SERVICE_UUID = "48f2d000-7a15-4b3f-8d67-60587f5d1001"
 DEFAULT_CHAR_UUID = "48f2d000-7a15-4b3f-8d67-60587f5d1002"
 DEFAULT_STT_PROVIDER = "whisper" if os.environ.get("WHISPER_API_URL") else "groq"
 DEFAULT_MODEL = "whisper-large-v3-turbo"
+DEFAULT_TRANSLATION_MODEL = "llama-3.1-8b-instant"
 DEFAULT_VAS_DEMO_DIR = "./"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RECORD_STATE_IDLE = 0x00
@@ -49,6 +50,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 			    help=f"Transcription model for Groq or local Whisper. Default: {DEFAULT_MODEL}")
 	parser.add_argument("--language", default="zh",
 			    help="Optional ISO-639-1 language hint for Groq/local Whisper. Default: zh")
+	parser.add_argument("--translate-to-en", action="store_true",
+			    help="Translate the final transcription to English before typing it.")
+	parser.add_argument("--translation-model", default=DEFAULT_TRANSLATION_MODEL,
+			    help=f"Groq text model used for translation. Default: {DEFAULT_TRANSLATION_MODEL}")
 	parser.add_argument("--whisper-api-url", default=os.environ.get("WHISPER_API_URL"),
 			    help="OpenAI-compatible Whisper transcription endpoint. Falls back to WHISPER_API_URL.")
 	parser.add_argument("--whisper-api-key", default=os.environ.get("WHISPER_API_KEY", ""),
@@ -97,6 +102,16 @@ class AudioDeviceError(RuntimeError):
 class Transcriber:
 	def transcribe(self, path: Path) -> str:
 		raise NotImplementedError
+
+
+class TextTransformer:
+	def transform(self, text: str) -> str:
+		raise NotImplementedError
+
+
+class IdentityTransformer(TextTransformer):
+	def transform(self, text: str) -> str:
+		return text
 
 
 def _input_devices() -> list[tuple[int, dict]]:
@@ -515,6 +530,56 @@ class VASTranscriber(Transcriber):
 		return text
 
 
+class GroqEnglishTranslator(TextTransformer):
+	def __init__(self, model: str):
+		api_key = os.environ.get("GROQ_API_KEY")
+		if not api_key:
+			raise RuntimeError("GROQ_API_KEY is not set; required for --translate-to-en")
+
+		self.client = Groq(api_key=api_key)
+		self.model = model
+
+	def transform(self, text: str) -> str:
+		if not text:
+			return text
+
+		messages = [
+			{
+				"role": "system",
+				"content": (
+					"You are translating raw speech transcription into English. "
+					"Translate the speaker's words faithfully and directly. "
+					"Do not answer the speaker, do not summarize, do not interpret intent, "
+					"and do not turn rhetorical questions into replies. "
+					"Preserve the original meaning, tone, and sentence form as much as possible. "
+					"If the input is already English, return it unchanged. "
+					"Return only the translated text."
+				),
+			},
+			{
+				"role": "user",
+				"content": f"Translate this transcript literally into English:\n\n{text}",
+			},
+		]
+		print(
+			f"Translation LLM request: {json.dumps({'model': self.model, 'messages': messages}, ensure_ascii=False)}",
+			flush=True,
+		)
+
+		result = self.client.chat.completions.create(
+			model=self.model,
+			temperature=0,
+			messages=messages,
+		)
+		print(
+			f"Translation LLM response: {json.dumps(result.to_dict(), ensure_ascii=False)}",
+			flush=True,
+		)
+		translated = (result.choices[0].message.content or "").strip()
+		print(f"English translation: {translated!r}", flush=True)
+		return translated
+
+
 def build_transcriber(args: argparse.Namespace) -> Transcriber:
 	if args.stt_provider == "groq":
 		return GroqTranscriber(model=args.model, language=args.language)
@@ -538,6 +603,13 @@ def build_transcriber(args: argparse.Namespace) -> Transcriber:
 		)
 
 	raise RuntimeError(f"Unsupported STT provider: {args.stt_provider}")
+
+
+def build_text_transformer(args: argparse.Namespace) -> TextTransformer:
+	if args.translate_to_en:
+		return GroqEnglishTranslator(model=args.translation_model)
+
+	return IdentityTransformer()
 
 
 def type_text_macos(text: str, press_return: bool) -> None:
@@ -576,6 +648,7 @@ class RecordControlApp:
 			recordings_dir=Path(args.recordings_dir),
 		)
 		self.transcriber = build_transcriber(args)
+		self.text_transformer = build_text_transformer(args)
 		self.recording_lock = asyncio.Lock()
 		self.shutdown_event = asyncio.Event()
 		self.currently_recording = False
@@ -683,6 +756,7 @@ class RecordControlApp:
 
 		try:
 			text = await asyncio.to_thread(self.transcriber.transcribe, result.path)
+			text = await asyncio.to_thread(self.text_transformer.transform, text)
 			await asyncio.to_thread(type_text_macos, text, self.args.press_return)
 		except Exception as exc:
 			print(f"Transcription/type error: {exc}", flush=True)
