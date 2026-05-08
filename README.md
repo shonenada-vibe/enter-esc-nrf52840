@@ -147,11 +147,19 @@ The helper now starts in a curses TUI by default. You can edit runtime settings 
 - `q`: quit
 
 Connection-related changes such as BLE device name or characteristic UUID trigger a reconnect so the new settings take effect right away. Recording, STT, translation, and typing settings are picked up on the next action without restarting the script.
+Runtime settings are now persisted to `~/Library/Application Support/EnterEscHost/config.json` by default, so TUI edits survive restarts.
 
 If you want the old non-TUI mode:
 
 ```sh
 python host/mac_record_control.py --no-tui
+```
+
+To use a different config file or ignore the saved one for a single launch:
+
+```sh
+python host/mac_record_control.py --config-file /path/to/config.json
+python host/mac_record_control.py --reset-config
 ```
 
 To use the helper with the `promicro_nrf52840/nrf52840/uf2` target instead of XIAO:
