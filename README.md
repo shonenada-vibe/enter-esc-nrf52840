@@ -162,6 +162,47 @@ python host/mac_record_control.py --config-file /path/to/config.json
 python host/mac_record_control.py --reset-config
 ```
 
+## macOS Menu Bar Shell
+
+There is now an initial native macOS menu bar shell under `macos/EnterEscMenuBar`.
+
+What it does today:
+
+- launches as a menu bar app
+- starts the Python host helper in background mode
+- reads and writes the same persisted config file used by the Python helper
+- lets you toggle:
+  - `translate_to_en`
+  - `press_return`
+- lets you:
+  - start the host
+  - stop the host
+  - restart the host
+  - open the config file
+  - open the config folder
+  - open the host log
+
+Build and run it with the full Xcode toolchain:
+
+```sh
+cd macos/EnterEscMenuBar
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run
+```
+
+If you launch it from outside the repository, set the repo root explicitly so it can find `host/mac_record_control.py`:
+
+```sh
+ENTER_ESC_REPO_ROOT=/path/to/yesnoaudio \
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+swift run --package-path /path/to/yesnoaudio/macos/EnterEscMenuBar
+```
+
+Notes:
+
+- The menu bar shell currently manages the existing Python runtime; it is not yet a full Swift rewrite of BLE/audio/STT behavior.
+- The shell writes logs to `~/Library/Logs/EnterEscHost/menu-bar.log`.
+- The Python helper config still lives at `~/Library/Application Support/EnterEscHost/config.json`.
+
 To use the helper with the `promicro_nrf52840/nrf52840/uf2` target instead of XIAO:
 
 ```sh

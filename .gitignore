@@ -6,3 +6,5 @@ host/vas-cli
 build/
 build.*/
 .cache/
+.build/
+DerivedData/
