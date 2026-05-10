@@ -9,6 +9,7 @@ from pathlib import Path
 try:
     from .app_core import (
         DEFAULT_CONFIG_PATH,
+        DEFAULT_STATE_PATH,
         RuntimeConfig,
         RuntimeConfigSnapshot,
         AppState,
@@ -21,11 +22,13 @@ try:
         install_signal_handlers,
         load_runtime_config,
         select_input_device,
+        state_path_for_config,
     )
     from .tui_app import run_tui
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_core import (
         DEFAULT_CONFIG_PATH,
+        DEFAULT_STATE_PATH,
         RuntimeConfig,
         RuntimeConfigSnapshot,
         AppState,
@@ -38,6 +41,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         install_signal_handlers,
         load_runtime_config,
         select_input_device,
+        state_path_for_config,
     )
     from tui_app import run_tui
 
@@ -115,9 +119,15 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
     return config
 
 
+def resolve_state_path(config: RuntimeConfig) -> Path:
+    if config.path == DEFAULT_CONFIG_PATH:
+        return DEFAULT_STATE_PATH
+    return state_path_for_config(config.path)
+
+
 async def main_async_cli(config: RuntimeConfig) -> int:
     logger = LogBuffer(echo_stdout=True)
-    state = AppState()
+    state = AppState(path=resolve_state_path(config))
     app = RecordControlApp(config=config, logger=logger, state=state)
     install_signal_handlers(app)
     return await app.run()

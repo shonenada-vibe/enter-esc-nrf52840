@@ -38,6 +38,7 @@ CONNECTION_FIELDS = {"device_name", "service_uuid", "char_uuid", "scan_timeout",
 MASKED_FIELDS = {"whisper_api_key", "vas_access_token"}
 CONFIG_DIR = Path.home() / "Library" / "Application Support" / "EnterEscHost"
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.json"
+DEFAULT_STATE_PATH = CONFIG_DIR / "state.json"
 
 
 @dataclass
@@ -136,6 +137,22 @@ def save_runtime_config(path: Path, snapshot: RuntimeConfigSnapshot) -> None:
     )
 
 
+def state_path_for_config(path: Path) -> Path:
+    if path == DEFAULT_CONFIG_PATH:
+        return DEFAULT_STATE_PATH
+    return path.with_name(f"{path.stem}.state.json")
+
+
+def save_app_state(path: Path, snapshot: AppStateSnapshot) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(
+        json.dumps(asdict(snapshot), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+
 class RuntimeConfig:
     def __init__(self, initial: RuntimeConfigSnapshot, path: Path):
         self._snapshot = initial
@@ -187,9 +204,11 @@ class RuntimeConfig:
 
 
 class AppState:
-    def __init__(self):
+    def __init__(self, path: Path):
         self._snapshot = AppStateSnapshot()
+        self._path = path
         self._lock = threading.Lock()
+        save_app_state(self._path, self._snapshot)
 
     def snapshot(self) -> AppStateSnapshot:
         with self._lock:
@@ -199,6 +218,8 @@ class AppState:
         with self._lock:
             for key, value in changes.items():
                 setattr(self._snapshot, key, value)
+            snapshot = replace(self._snapshot)
+        save_app_state(self._path, snapshot)
 
 
 class Transcriber:
@@ -931,4 +952,3 @@ def apply_namespace_overrides(config: RuntimeConfig, args: argparse.Namespace) -
         if hasattr(args, name)
     }
     config.set_initial_overrides(overrides)
-

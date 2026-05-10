@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 
 private let configRelativePath = "Library/Application Support/EnterEscHost/config.json"
+private let stateRelativePath = "Library/Application Support/EnterEscHost/state.json"
 private let logRelativePath = "Library/Logs/EnterEscHost/menu-bar.log"
 
 final class ConfigStore {
@@ -68,6 +69,51 @@ final class ConfigStore {
         dictionary[key] = value
         try save(dictionary)
         return dictionary
+    }
+}
+
+struct RuntimeStateSnapshot {
+    let status: String
+    let connectedDevice: String
+    let recording: Bool
+    let lastConfigChange: String
+    let lastError: String
+
+    static let empty = RuntimeStateSnapshot(
+        status: "idle",
+        connectedDevice: "",
+        recording: false,
+        lastConfigChange: "",
+        lastError: ""
+    )
+}
+
+final class StateStore {
+    let url: URL
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    func load() -> RuntimeStateSnapshot {
+        guard let data = try? Data(contentsOf: url) else {
+            return .empty
+        }
+
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data),
+            let dictionary = object as? [String: Any]
+        else {
+            return .empty
+        }
+
+        return RuntimeStateSnapshot(
+            status: dictionary["status"] as? String ?? "idle",
+            connectedDevice: dictionary["connected_device"] as? String ?? "",
+            recording: dictionary["recording"] as? Bool ?? false,
+            lastConfigChange: dictionary["last_config_change"] as? String ?? "",
+            lastError: dictionary["last_error"] as? String ?? ""
+        )
     }
 }
 
@@ -246,22 +292,29 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     private let menu = NSMenu()
 
     private let configStore: ConfigStore
+    private let stateStore: StateStore
     private let hostController: HostProcessController
+    private var refreshTimer: Timer?
 
-    private let stateItem = NSMenuItem(title: "State: Unknown", action: nil, keyEquivalent: "")
+    private let hostStateItem = NSMenuItem(title: "Host: Unknown", action: nil, keyEquivalent: "")
+    private let runtimeStateItem = NSMenuItem(title: "Runtime: Unknown", action: nil, keyEquivalent: "")
+    private let recordingItem = NSMenuItem(title: "Recording: no", action: nil, keyEquivalent: "")
     private let configPathItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let lastErrorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let startItem = NSMenuItem(title: "Start Host", action: #selector(startHost), keyEquivalent: "")
     private let stopItem = NSMenuItem(title: "Stop Host", action: #selector(stopHost), keyEquivalent: "")
     private let restartItem = NSMenuItem(title: "Restart Host", action: #selector(restartHost), keyEquivalent: "")
     private let translationItem = NSMenuItem(title: "Translate To English", action: #selector(toggleTranslation), keyEquivalent: "")
     private let pressReturnItem = NSMenuItem(title: "Press Return", action: #selector(togglePressReturn), keyEquivalent: "")
     private let openConfigItem = NSMenuItem(title: "Open Config File", action: #selector(openConfigFile), keyEquivalent: "")
+    private let openStateItem = NSMenuItem(title: "Open Runtime State", action: #selector(openStateFile), keyEquivalent: "")
     private let openConfigFolderItem = NSMenuItem(title: "Open Config Folder", action: #selector(openConfigFolder), keyEquivalent: "")
     private let openLogItem = NSMenuItem(title: "Open Host Log", action: #selector(openLogFile), keyEquivalent: "")
     private let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
 
-    init(configStore: ConfigStore, hostController: HostProcessController) {
+    init(configStore: ConfigStore, stateStore: StateStore, hostController: HostProcessController) {
         self.configStore = configStore
+        self.stateStore = stateStore
         self.hostController = hostController
         super.init()
         NotificationCenter.default.addObserver(
@@ -276,6 +329,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         setupMenu()
         hostController.start()
+        refreshTimer = Timer.scheduledTimer(
+            timeInterval: 1.0,
+            target: self,
+            selector: #selector(refreshMenu),
+            userInfo: nil,
+            repeats: true
+        )
         refreshMenu()
     }
 
@@ -284,8 +344,11 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
             button.title = "EnterEsc"
         }
 
-        stateItem.isEnabled = false
+        hostStateItem.isEnabled = false
+        runtimeStateItem.isEnabled = false
+        recordingItem.isEnabled = false
         configPathItem.isEnabled = false
+        lastErrorItem.isEnabled = false
 
         startItem.target = self
         stopItem.target = self
@@ -293,12 +356,16 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         translationItem.target = self
         pressReturnItem.target = self
         openConfigItem.target = self
+        openStateItem.target = self
         openConfigFolderItem.target = self
         openLogItem.target = self
         quitItem.target = self
 
-        menu.addItem(stateItem)
+        menu.addItem(hostStateItem)
+        menu.addItem(runtimeStateItem)
+        menu.addItem(recordingItem)
         menu.addItem(configPathItem)
+        menu.addItem(lastErrorItem)
         menu.addItem(.separator())
         menu.addItem(startItem)
         menu.addItem(stopItem)
@@ -308,6 +375,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         menu.addItem(pressReturnItem)
         menu.addItem(.separator())
         menu.addItem(openConfigItem)
+        menu.addItem(openStateItem)
         menu.addItem(openConfigFolderItem)
         menu.addItem(openLogItem)
         menu.addItem(.separator())
@@ -320,9 +388,14 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         let translateEnabled = configStore.bool(forKey: "translate_to_en")
         let pressReturnEnabled = configStore.bool(forKey: "press_return")
         let deviceName = configStore.string(forKey: "device_name", default: "EnterEsc Seeed")
+        let runtimeState = stateStore.load()
 
-        stateItem.title = "State: \(hostController.state.rawValue)\(hostController.lastError.isEmpty ? "" : " (\(hostController.lastError))")"
+        hostStateItem.title = "Host: \(hostController.state.rawValue)\(hostController.lastError.isEmpty ? "" : " (\(hostController.lastError))")"
+        runtimeStateItem.title = "Runtime: \(runtimeState.status) | Connected: \(runtimeState.connectedDevice.isEmpty ? "-" : runtimeState.connectedDevice)"
+        recordingItem.title = "Recording: \(runtimeState.recording ? "yes" : "no")"
         configPathItem.title = "Device: \(deviceName)"
+        lastErrorItem.title = runtimeState.lastError.isEmpty ? "Last error: -" : "Last error: \(runtimeState.lastError)"
+        lastErrorItem.isHidden = runtimeState.lastError.isEmpty
         translationItem.state = translateEnabled ? .on : .off
         pressReturnItem.state = pressReturnEnabled ? .on : .off
         startItem.isEnabled = !hostController.isRunning
@@ -330,7 +403,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         restartItem.isEnabled = hostController.isRunning
 
         if let button = statusItem.button {
-            button.title = translateEnabled ? "EnterEsc EN" : "EnterEsc"
+            if runtimeState.recording {
+                button.title = "EnterEsc REC"
+            } else if translateEnabled {
+                button.title = "EnterEsc EN"
+            } else {
+                button.title = "EnterEsc"
+            }
         }
     }
 
@@ -366,6 +445,11 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(configStore.url)
     }
 
+    @objc private func openStateFile() {
+        ensureStateFile()
+        NSWorkspace.shared.open(stateStore.url)
+    }
+
     @objc private func openConfigFolder() {
         ensureConfigFile()
         NSWorkspace.shared.open(configStore.url.deletingLastPathComponent())
@@ -376,6 +460,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quitApp() {
+        refreshTimer?.invalidate()
         hostController.stop()
         NSApp.terminate(nil)
     }
@@ -386,6 +471,26 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         }
         try? configStore.save([:])
     }
+
+    private func ensureStateFile() {
+        if FileManager.default.fileExists(atPath: stateStore.url.path) {
+            return
+        }
+        try? FileManager.default.createDirectory(
+            at: stateStore.url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let payload = """
+        {
+          "connected_device" : "",
+          "last_config_change" : "",
+          "last_error" : "",
+          "recording" : false,
+          "status" : "idle"
+        }
+        """
+        try? payload.write(to: stateStore.url, atomically: true, encoding: .utf8)
+    }
 }
 
 func defaultConfigURL() -> URL {
@@ -394,6 +499,10 @@ func defaultConfigURL() -> URL {
 
 func defaultLogURL() -> URL {
     FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(logRelativePath)
+}
+
+func defaultStateURL() -> URL {
+    FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(stateRelativePath)
 }
 
 func resolveRepoRoot() -> URL {
@@ -421,6 +530,7 @@ func resolveRepoRoot() -> URL {
 }
 
 let configStore = ConfigStore(url: defaultConfigURL())
+let stateStore = StateStore(url: defaultStateURL())
 let hostController = HostProcessController(
     repoRoot: resolveRepoRoot(),
     configURL: defaultConfigURL(),
@@ -428,6 +538,6 @@ let hostController = HostProcessController(
 )
 
 let app = NSApplication.shared
-let delegate = MenuBarController(configStore: configStore, hostController: hostController)
+let delegate = MenuBarController(configStore: configStore, stateStore: stateStore, hostController: hostController)
 app.delegate = delegate
 app.run()

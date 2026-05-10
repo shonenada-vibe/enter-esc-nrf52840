@@ -171,6 +171,7 @@ What it does today:
 - launches as a menu bar app
 - starts the Python host helper in background mode
 - reads and writes the same persisted config file used by the Python helper
+- reads the Python helper runtime state from `~/Library/Application Support/EnterEscHost/state.json`
 - lets you toggle:
   - `translate_to_en`
   - `press_return`
@@ -179,8 +180,13 @@ What it does today:
   - stop the host
   - restart the host
   - open the config file
+  - open the runtime state file
   - open the config folder
   - open the host log
+- shows live runtime status:
+  - BLE scanning / connected / stopped / error
+  - connected device name
+  - recording on/off
 
 Build and run it with the full Xcode toolchain:
 
@@ -202,6 +208,7 @@ Notes:
 - The menu bar shell currently manages the existing Python runtime; it is not yet a full Swift rewrite of BLE/audio/STT behavior.
 - The shell writes logs to `~/Library/Logs/EnterEscHost/menu-bar.log`.
 - The Python helper config still lives at `~/Library/Application Support/EnterEscHost/config.json`.
+- The Python helper runtime state lives at `~/Library/Application Support/EnterEscHost/state.json`.
 
 To use the helper with the `promicro_nrf52840/nrf52840/uf2` target instead of XIAO:
 

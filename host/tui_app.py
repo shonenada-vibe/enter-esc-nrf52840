@@ -18,6 +18,7 @@ try:
         format_input_devices,
         install_signal_handlers,
         run_app_thread,
+        state_path_for_config,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_core import (
@@ -31,6 +32,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         format_input_devices,
         install_signal_handlers,
         run_app_thread,
+        state_path_for_config,
     )
 
 
@@ -310,7 +312,7 @@ class TerminalUi:
 
 def run_tui(config: RuntimeConfig) -> int:
     logger = LogBuffer(echo_stdout=False)
-    state = AppState()
+    state = AppState(path=state_path_for_config(config.path))
     app = RecordControlApp(config=config, logger=logger, state=state)
     install_signal_handlers(app)
 
